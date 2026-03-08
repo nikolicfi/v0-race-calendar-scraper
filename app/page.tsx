@@ -56,7 +56,7 @@ export default function ScraperPage() {
         }
 
         const data = await response.json()
-        console.log("[v0] Page response:", currentPage, "races found:", data.races?.length || 0)
+        console.log("[v0] Page response:", currentPage, "races found:", data.races?.length || 0, "debug:", data.debug)
 
         if (!data.success) {
           console.log("[v0] Page not successful:", currentPage, data.error)

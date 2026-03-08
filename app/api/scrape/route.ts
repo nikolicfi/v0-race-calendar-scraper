@@ -37,7 +37,7 @@ interface RaceEvent {
 function parseEventsFromHtml(html: string, pageNum: number): RaceEvent[] {
   const races: RaceEvent[] = []
 
-  // Clean HTML
+  // Clean HTML for text extraction
   let text = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
@@ -47,126 +47,119 @@ function parseEventsFromHtml(html: string, pageNum: number): RaceEvent[] {
     .replace(/&Auml;/g, "Ä").replace(/&Ouml;/g, "Ö").replace(/&Uuml;/g, "Ü")
     .replace(/&szlig;/g, "ß")
 
-  // Find event links - /lauf/ pages are individual events
-  const eventLinkPattern = /<a[^>]+href=["']([^"']*\/lauf\/[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi
-  const matches = [...text.matchAll(eventLinkPattern)]
-
-  for (const match of matches) {
-    const linkContent = match[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
-
-    if (linkContent.length < 5 || linkContent.length > 120) continue
-    if (/^(Home|Menu|Suche|Filter|Cookie|Mehr|Alle)/i.test(linkContent)) continue
-
+  // Method 1: Find h2 headers (race names) and extract context around them
+  // The website structure shows: date block, then ## RaceName, then location, region
+  const h2Pattern = /<h2[^>]*>([\s\S]*?)<\/h2>/gi
+  const h2Matches = [...text.matchAll(h2Pattern)]
+  
+  for (const match of h2Matches) {
+    const raceName = match[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
+    
+    // Skip if too short or navigation-like
+    if (raceName.length < 3 || raceName.length > 150) continue
+    if (/^(Laufkalender|Home|Menu|Suche|Filter|Cookie|Navigation)/i.test(raceName)) continue
+    
     const position = match.index || 0
-    const contextBefore = text.slice(Math.max(0, position - 600), position)
-    const contextAfter = text.slice(position, Math.min(text.length, position + 600))
-    const fullContext = contextBefore + contextAfter
-
-    // Find region
-    let region = ""
-    let location = ""
-
-    for (const r of REGIONS) {
-      const regionPattern = new RegExp(`([A-Za-zäöüÄÖÜß][A-Za-zäöüÄÖÜß\\s-]{1,30}),\\s*${r}(?![a-z])`, "i")
-      const regionMatch = fullContext.match(regionPattern)
-      if (regionMatch) {
-        region = r
-        location = regionMatch[1].trim()
-        break
-      }
-      // Just region without location
-      if (fullContext.includes(r)) {
-        region = r
-        location = r
-      }
-    }
-
-    if (!region) continue
-
-    // Find date
+    const contextBefore = text.slice(Math.max(0, position - 500), position)
+    const contextAfter = text.slice(position, Math.min(text.length, position + 500))
+    
+    // Find date in context before (format: Mär7, Apr15, etc. or Mär6-7)
     let date = ""
     let dateFormatted = ""
     let month = ""
     let year = "2026"
-
-    // Pattern: Mär7, Apr15, etc.
-    const shortPattern = /(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)(\d{1,2})/i
-    const shortMatch = contextBefore.match(shortPattern)
     
-    if (shortMatch) {
-      const monthStr = shortMatch[1].toLowerCase().slice(0, 3)
+    // Pattern: Mär7 or Mär6-7
+    const datePattern = /(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)\s*(\d{1,2})(?:\s*-\s*\d{1,2})?/i
+    const dateMatch = contextBefore.match(datePattern)
+    
+    if (dateMatch) {
+      const monthStr = dateMatch[1].toLowerCase().slice(0, 3)
       month = MONTH_MAP[monthStr] || "01"
-      const day = shortMatch[2].padStart(2, "0")
+      const day = dateMatch[2].padStart(2, "0")
       
+      // If month is Jan or Feb, it's likely 2027
       if (parseInt(month) <= 2) year = "2027"
       
       date = `${year}-${month}-${day}`
       dateFormatted = `${parseInt(day)}. ${MONTH_NAMES[month]} ${year}`
-    } else {
-      // Try: 7. März, März 7
-      const longPattern = /(\d{1,2})\.?\s*(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)/i
-      const longMatch = contextBefore.match(longPattern)
-      
-      if (longMatch) {
-        const day = longMatch[1].padStart(2, "0")
-        const monthStr = longMatch[2].toLowerCase().slice(0, 3)
-        month = MONTH_MAP[monthStr] || "01"
-        
-        if (parseInt(month) <= 2) year = "2027"
-        
-        date = `${year}-${month}-${day}`
-        dateFormatted = `${parseInt(day)}. ${MONTH_NAMES[month]} ${year}`
+    }
+    
+    if (!date) continue
+    
+    // Find location and region in context after
+    // Format is usually: City, Region
+    let region = ""
+    let location = ""
+    
+    for (const r of REGIONS) {
+      // Look for "City, Region" pattern
+      const locationPattern = new RegExp(`([A-Za-zäöüÄÖÜß][A-Za-zäöüÄÖÜß\\s-]{1,40}),\\s*${r}`, "i")
+      const locationMatch = contextAfter.match(locationPattern)
+      if (locationMatch) {
+        region = r
+        location = locationMatch[1].trim()
+        break
       }
     }
-
-    if (!date) continue
-
-    // Category
+    
+    if (!region) continue
+    
+    // Determine category
     let category = "Laufrennen"
-    const categories = ["Trailrun", "Trail Run", "Triathlon", "Hindernislauf", "Urban Trail",
-      "Backyard Ultra", "Multisport", "Aquathlon", "Crossduathlon", "Duathlon",
-      "Crosstriathlon", "Marathon", "Halbmarathon", "Ultramarathon", "Berglauf"]
-
-    for (const cat of categories) {
-      if (fullContext.toLowerCase().includes(cat.toLowerCase())) {
+    const categoryKeywords = [
+      { keyword: "Trailrun", cat: "Trailrun" },
+      { keyword: "Trail", cat: "Trailrun" },
+      { keyword: "Triathlon", cat: "Triathlon" },
+      { keyword: "Hindernislauf", cat: "Hindernislauf" },
+      { keyword: "Halbmarathon", cat: "Halbmarathon" },
+      { keyword: "Marathon", cat: "Marathon" },
+      { keyword: "Ultramarathon", cat: "Ultramarathon" },
+      { keyword: "Backyard", cat: "Backyard Ultra" },
+      { keyword: "Duathlon", cat: "Duathlon" },
+      { keyword: "Aquathlon", cat: "Aquathlon" }
+    ]
+    
+    const fullContext = contextBefore + contextAfter
+    for (const { keyword, cat } of categoryKeywords) {
+      if (fullContext.toLowerCase().includes(keyword.toLowerCase())) {
         category = cat
         break
       }
     }
-
-    // Distances
+    
+    // Extract distances
     const distances: string[] = []
     const distPattern = /(\d+(?:[,\.]\d+)?)\s*km/gi
-    const distMatches = contextAfter.matchAll(distPattern)
+    const distMatches = [...contextAfter.matchAll(distPattern)]
     for (const dm of distMatches) {
       const dist = dm[0].trim()
       if (!distances.includes(dist) && distances.length < 8) {
         distances.push(dist)
       }
     }
-
-    // Image
-    let imageUrl: string | undefined
-    const imgMatch = fullContext.match(/<img[^>]+src=["']([^"']+(?:\.jpg|\.png|\.webp)[^"']*)["']/i)
-    if (imgMatch && !imgMatch[1].includes("logo") && !imgMatch[1].includes("icon")) {
-      imageUrl = imgMatch[1]
-      if (imageUrl.startsWith("/")) {
-        imageUrl = `https://running.life${imageUrl}`
-      }
+    
+    // Check for Halbmarathon text (add as distance if present)
+    if (contextAfter.toLowerCase().includes("halbmarathon") && !distances.some(d => d.includes("21"))) {
+      distances.push("21.1 km")
     }
-
+    
+    // Avoid duplicates
+    const isDuplicate = races.some(r => r.name === raceName && r.date === date)
+    if (isDuplicate) continue
+    
     races.push({
       id: `p${pageNum}-${races.length}`,
       date,
       dateFormatted,
-      name: linkContent,
+      name: raceName,
       location,
       region,
       category,
       distances,
       month,
       year,
-      imageUrl
+      imageUrl: undefined
     })
   }
 
@@ -246,6 +239,13 @@ export async function GET(request: Request) {
 
     // Parse races
     const races = parseEventsFromHtml(html, page)
+    
+    // Debug: count links found in HTML
+    const laufLinks = (html.match(/\/lauf\//gi) || []).length
+    const allLinks = (html.match(/<a[^>]+href/gi) || []).length
+    
+    // Check if this looks like a JS-rendered page (minimal content)
+    const isJsRendered = html.length < 5000 || (allLinks < 10 && laufLinks === 0)
 
     return NextResponse.json({
       success: true,
@@ -253,7 +253,13 @@ export async function GET(request: Request) {
       page,
       hasMore,
       totalPages,
-      htmlLength: html.length // For debugging
+      debug: {
+        htmlLength: html.length,
+        laufLinksFound: laufLinks,
+        totalLinksFound: allLinks,
+        isJsRendered,
+        htmlSample: html.slice(0, 500)
+      }
     })
 
   } catch (error) {
