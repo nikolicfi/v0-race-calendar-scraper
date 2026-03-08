@@ -22,9 +22,26 @@ export default function ScraperPage() {
   const handleScrape = async () => {
     setIsLoading(true)
     setError(null)
+    setRaces([])
+    setPagesScraped(undefined)
+    setTotalPagesExpected(undefined)
+    setStatistics(undefined)
+    setScrapedAt(null)
     
     try {
-      const response = await fetch("/api/scrape")
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 58000)
+      
+      const response = await fetch("/api/scrape", {
+        signal: controller.signal
+      })
+      
+      clearTimeout(timeoutId)
+      
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`)
+      }
+      
       const data: ScrapeResponse = await response.json()
       
       if (data.success) {
@@ -36,8 +53,16 @@ export default function ScraperPage() {
       } else {
         setError(data.error || "Failed to scrape data")
       }
-    } catch {
-      setError("Failed to connect to scraper")
+    } catch (err) {
+      if (err instanceof Error) {
+        if (err.name === 'AbortError') {
+          setError("Request timed out. The scraper may be taking longer than expected. Please try again.")
+        } else {
+          setError(err.message || "Failed to connect to scraper")
+        }
+      } else {
+        setError("Failed to connect to scraper")
+      }
     } finally {
       setIsLoading(false)
     }

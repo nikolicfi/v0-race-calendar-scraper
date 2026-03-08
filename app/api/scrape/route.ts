@@ -15,10 +15,12 @@ export interface RaceEvent {
   year: string
 }
 
+export const maxDuration = 60
+
 const MONTHS: Record<string, string> = {
   'Januar': '01', 'Jan': '01',
   'Februar': '02', 'Feb': '02',
-  'März': '03', 'Mär': '03',
+  'März': '03', 'Mär': '03', 'Mar': '03',
   'April': '04', 'Apr': '04',
   'Mai': '05',
   'Juni': '06', 'Jun': '06',
@@ -40,23 +42,33 @@ const REGIONS = [
   'Oberösterreich', 'Niederösterreich', 'Kärnten', 'Burgenland'
 ]
 
-async function fetchPage(pageNum: number): Promise<string> {
+async function fetchPage(pageNum: number, signal?: AbortSignal): Promise<string | null> {
   const baseUrl = 'https://running.life/laufkalender/osterreich'
   const url = pageNum === 1 ? baseUrl : `${baseUrl}?page=${pageNum}`
   
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
-    },
-  })
-  
-  if (!response.ok) {
-    throw new Error(`Failed to fetch page ${pageNum}: ${response.status}`)
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
+      },
+      signal,
+    })
+    
+    if (!response.ok) {
+      console.error(`Page ${pageNum} failed with status ${response.status}`)
+      return null
+    }
+    
+    return await response.text()
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw error
+    }
+    console.error(`Error fetching page ${pageNum}:`, error)
+    return null
   }
-  
-  return response.text()
 }
 
 function extractTextContent(html: string): string {
@@ -89,7 +101,7 @@ function parseEventsFromText(text: string, existingCount: number): RaceEvent[] {
   while (i < lines.length) {
     const line = lines[i]
     
-    // Check for month/year header like "März 2026" or "April 2026"
+    // Check for month/year header like "März 2026"
     const monthYearMatch = line.match(/^(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+(\d{4})$/i)
     if (monthYearMatch) {
       currentMonth = MONTHS[monthYearMatch[1]] || ''
@@ -98,12 +110,13 @@ function parseEventsFromText(text: string, existingCount: number): RaceEvent[] {
       continue
     }
     
-    // Check for date pattern like "Mär7Sa" or "Mär6-7Fr - Sa" or "Apr12So"
+    // Check for date pattern like "Mär7Sa" or "Apr12So"
     const dateMatch = line.match(/^([A-Za-zäöü]{3})(\d{1,2})(?:-(\d{1,2}))?([A-Za-z\s-]*)$/)
     
     if (dateMatch) {
       const monthAbbr = dateMatch[1]
-      const monthNum = MONTHS[monthAbbr] || MONTHS[monthAbbr.charAt(0).toUpperCase() + monthAbbr.slice(1).toLowerCase()]
+      const normalizedAbbr = monthAbbr.charAt(0).toUpperCase() + monthAbbr.slice(1).toLowerCase()
+      const monthNum = MONTHS[monthAbbr] || MONTHS[normalizedAbbr]
       
       if (monthNum) {
         if (monthNum !== currentMonth) {
@@ -115,34 +128,29 @@ function parseEventsFromText(text: string, existingCount: number): RaceEvent[] {
         const dateStr = `${currentYear}-${monthNum}-${day}`
         const dateRange = endDay ? `${day}-${endDay}` : undefined
         
-        // Move to next line to look for event name
         i++
         
-        // Skip day abbreviations like "Fr - Sa" or "So"
+        // Skip day abbreviations
         while (i < lines.length && /^(Mo|Di|Mi|Do|Fr|Sa|So)(\s*-\s*(Mo|Di|Mi|Do|Fr|Sa|So))?$/.test(lines[i])) {
           i++
         }
         
         if (i >= lines.length) break
         
-        // This should be the event name
         const eventName = lines[i]
         
-        // Skip if it looks like another date or section header
         if (eventName.match(/^[A-Za-zäöü]{3}\d{1,2}/) || eventName.match(/^(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)/i)) {
           continue
         }
         
         i++
         
-        // Look for location (format: "City, Region")
         let location = ''
         let region = ''
         
         while (i < lines.length) {
           const locLine = lines[i]
           
-          // Check if this line is a location with region
           const locMatch = locLine.match(/^([^,]+),\s*(.+)$/)
           if (locMatch) {
             location = locMatch[1].trim()
@@ -151,7 +159,6 @@ function parseEventsFromText(text: string, existingCount: number): RaceEvent[] {
             break
           }
           
-          // If we hit another date pattern, break
           if (locLine.match(/^[A-Za-zäöü]{3}\d{1,2}/)) {
             break
           }
@@ -163,33 +170,27 @@ function parseEventsFromText(text: string, existingCount: number): RaceEvent[] {
           continue
         }
         
-        // Validate region is a known Austrian region
         const isValidRegion = REGIONS.some(r => region.includes(r))
         if (!isValidRegion) {
           continue
         }
         
-        // Look for category and distances
         let category = 'Straßenrennen'
         const distances: string[] = []
         
-        // Check next few lines for category and distances
         const checkLines = Math.min(5, lines.length - i)
         for (let j = 0; j < checkLines; j++) {
           const detailLine = lines[i + j]
           
-          // Stop if we hit another date or location
           if (detailLine.match(/^[A-Za-zäöü]{3}\d{1,2}/) || detailLine.includes(',')) {
             break
           }
           
-          // Check for category
           const foundCategory = CATEGORIES.find(cat => detailLine === cat || detailLine.startsWith(cat + ' '))
           if (foundCategory) {
             category = foundCategory
           }
           
-          // Check for distances
           const distMatches = detailLine.match(/(\d+\s*km|Halbmarathon|Marathon|\d+\s*hr)/gi)
           if (distMatches) {
             for (const dist of distMatches) {
@@ -225,79 +226,80 @@ function parseEventsFromText(text: string, existingCount: number): RaceEvent[] {
 }
 
 function getTotalPages(text: string): number {
-  // Look for total race count like "650 Rennen"
   const countMatch = text.match(/(\d+)\s*Rennen/i)
   if (countMatch) {
     const totalRaces = parseInt(countMatch[1])
-    // Approximately 20 events per page
     return Math.ceil(totalRaces / 20)
   }
-  return 35 // Default to 35 pages (~700 events)
+  return 35
 }
 
 async function scrapeAllRaces(): Promise<{ races: RaceEvent[], pagesScraped: number, totalExpected: number }> {
   const allRaces: RaceEvent[] = []
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 55000)
   
-  // First, fetch page 1 to get total count
-  const firstPageHtml = await fetchPage(1)
-  const firstPageText = extractTextContent(firstPageHtml)
-  const totalPages = getTotalPages(firstPageText)
-  
-  // Parse first page
-  const firstPageRaces = parseEventsFromText(firstPageText, 0)
-  allRaces.push(...firstPageRaces)
-  
-  // Fetch remaining pages in batches to avoid overwhelming the server
-  const BATCH_SIZE = 5
-  let pagesScraped = 1
-  
-  for (let batchStart = 2; batchStart <= totalPages; batchStart += BATCH_SIZE) {
-    const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, totalPages)
-    const pagePromises: Promise<string>[] = []
-    
-    for (let page = batchStart; page <= batchEnd; page++) {
-      pagePromises.push(fetchPage(page))
+  try {
+    const firstPageHtml = await fetchPage(1, controller.signal)
+    if (!firstPageHtml) {
+      throw new Error('Failed to fetch first page')
     }
     
-    try {
+    const firstPageText = extractTextContent(firstPageHtml)
+    const totalPages = getTotalPages(firstPageText)
+    
+    const firstPageRaces = parseEventsFromText(firstPageText, 0)
+    allRaces.push(...firstPageRaces)
+    
+    let pagesScraped = 1
+    const CONCURRENCY = 10
+    
+    for (let batchStart = 2; batchStart <= totalPages; batchStart += CONCURRENCY) {
+      if (controller.signal.aborted) break
+      
+      const batchEnd = Math.min(batchStart + CONCURRENCY - 1, totalPages)
+      const pagePromises: Promise<string | null>[] = []
+      
+      for (let page = batchStart; page <= batchEnd; page++) {
+        pagePromises.push(fetchPage(page, controller.signal))
+      }
+      
       const pageResults = await Promise.all(pagePromises)
       
       for (const html of pageResults) {
-        const text = extractTextContent(html)
-        const pageRaces = parseEventsFromText(text, allRaces.length)
-        allRaces.push(...pageRaces)
-        pagesScraped++
+        if (html) {
+          const text = extractTextContent(html)
+          const pageRaces = parseEventsFromText(text, allRaces.length)
+          allRaces.push(...pageRaces)
+          pagesScraped++
+        }
       }
-    } catch (error) {
-      console.error(`Error fetching batch starting at page ${batchStart}:`, error)
-      // Continue with next batch
     }
     
-    // Small delay between batches
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-  
-  // Deduplicate by name + date + location
-  const seen = new Set<string>()
-  const uniqueRaces = allRaces.filter(race => {
-    const key = `${race.name}|${race.date}|${race.location}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-  
-  // Sort by date
-  uniqueRaces.sort((a, b) => a.date.localeCompare(b.date))
-  
-  // Re-assign IDs
-  uniqueRaces.forEach((race, index) => {
-    race.id = `race-${index + 1}`
-  })
-  
-  return {
-    races: uniqueRaces,
-    pagesScraped,
-    totalExpected: totalPages
+    clearTimeout(timeout)
+    
+    const seen = new Set<string>()
+    const uniqueRaces = allRaces.filter(race => {
+      const key = `${race.name}|${race.date}|${race.location}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    
+    uniqueRaces.sort((a, b) => a.date.localeCompare(b.date))
+    
+    uniqueRaces.forEach((race, index) => {
+      race.id = `race-${index + 1}`
+    })
+    
+    return {
+      races: uniqueRaces,
+      pagesScraped,
+      totalExpected: totalPages
+    }
+  } catch (error) {
+    clearTimeout(timeout)
+    throw error
   }
 }
 
@@ -305,7 +307,6 @@ export async function GET() {
   try {
     const { races, pagesScraped, totalExpected } = await scrapeAllRaces()
     
-    // Calculate statistics
     const regionCounts: Record<string, number> = {}
     const categoryCounts: Record<string, number> = {}
     const monthCounts: Record<string, number> = {}
