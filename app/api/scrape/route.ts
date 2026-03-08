@@ -162,157 +162,156 @@ export async function GET(request: Request) {
 function parseRacesFromHtml(html: string, pageNum: number): RaceEvent[] {
   const races: RaceEvent[] = []
 
-  // The HTML structure is:
+  // Real HTML structure (confirmed from debug logs):
   // <section wire:key="event:XXXXX">
-  //   <div class="event-card-row">
-  //     <div class="event-calendar"> (contains month + day)
-  //     <a href="/de/termine/race-slug">Race Name</a>
-  //     Location, Region
-  //     <a class="label-distance">X km</a>
-  
-  // Split HTML by event sections
-  const eventSections = html.split(/wire:key="event:\d+"/)
-  
-  for (let i = 1; i < eventSections.length; i++) {
-    const section = eventSections[i]
-    
-    // Get the section up to the next major boundary
-    const sectionEnd = section.indexOf('wire:key="event:')
-    const eventHtml = sectionEnd > 0 ? section.slice(0, sectionEnd) : section.slice(0, 3000)
-    
-    // Extract date from event-calendar div
-    // Format: <div class="event-calendar">...<div>Mär</div>...<div>8</div>...
+  //   <a href="/de/termine/slug" class="..."> <-- FIRST LINK: image/calendar wrapper (no text content)
+  //     <div class="event-calendar">
+  //       <div>Mär</div>  <-- month abbreviation
+  //       <div>8</div>    <-- day number
+  //     </div>
+  //   </a>
+  //   ... then later the race name link and location/region text ...
+  //   <a href="/de/termine/slug" class="label-distance">6 km</a>  <-- distance links
+  // </section>
+
+  // Use a regex to find each <section wire:key="event:..."> block
+  const sectionRegex = /<section[^>]*wire:key="event:(\d+)"[^>]*>([\s\S]*?)<\/section>/gi
+  const sectionMatches = [...html.matchAll(sectionRegex)]
+
+  for (const sectionMatch of sectionMatches) {
+    const eventHtml = sectionMatch[2]
+
+    // --- DATE ---
+    // event-calendar div contains two child divs: month abbrev then day number
     let date = ""
     let dateFormatted = ""
     let month = ""
     let year = "2026"
-    
-    const calendarMatch = eventHtml.match(/event-calendar[\s\S]*?<div[^>]*>([A-Za-zäü]{3})<\/div>[\s\S]*?<div[^>]*>(\d{1,2})(?:-(\d{1,2}))?<\/div>/i)
+
+    const calendarMatch = eventHtml.match(/class="event-calendar"[\s\S]*?<div[^>]*>\s*([A-Za-z\u00e4\u00fc]{3})\s*<\/div>[\s\S]*?<div[^>]*>\s*(\d{1,2})\s*<\/div>/i)
     if (calendarMatch) {
       const monthStr = calendarMatch[1].toLowerCase().slice(0, 3)
-      month = MONTH_MAP[monthStr] || "03"
+      month = MONTH_MAP[monthStr] || "01"
       const day = calendarMatch[2].padStart(2, "0")
       year = parseInt(month) <= 2 ? "2027" : "2026"
       date = `${year}-${month}-${day}`
       dateFormatted = `${parseInt(day)}. ${MONTH_NAMES[month]} ${year}`
     }
-    
+
     if (!date) continue
-    
-    // Extract race URL and name from the main event link
-    // The race link is usually the one with /de/termine/ that has text content (not just an image)
-    const linkMatches = [...eventHtml.matchAll(/<a[^>]*href="([^"]*\/de\/termine\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)]
-    
+
+    // --- RACE NAME & URL ---
+    // Find all /de/termine/ links in this section
+    const allTermineLinks = [...eventHtml.matchAll(/<a[^>]*href="((?:https:\/\/running\.life)?\/de\/termine\/[^"]+)"([^>]*)>([\s\S]*?)<\/a>/gi)]
+
     let eventUrl = ""
     let raceName = ""
-    
-    for (const linkMatch of linkMatches) {
-      const url = linkMatch[1]
-      const content = linkMatch[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
-      
-      // Skip distance links (they have label-distance class)
-      if (linkMatch[0].includes("label-distance")) continue
-      
-      // Skip image-only links (content is empty or very short)
-      if (content.length > 3 && content.length < 150) {
-        eventUrl = url.startsWith("http") ? url : `https://running.life${url}`
-        raceName = content
+
+    for (const lm of allTermineLinks) {
+      const href = lm[1]
+      const attrs = lm[2]
+      const innerHtml = lm[3]
+      const text = innerHtml.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
+
+      // Skip label-distance links
+      if (attrs.includes("label-distance") || innerHtml.includes("label-distance")) continue
+
+      // Skip links whose only content is the event-calendar div (image wrapper)
+      if (innerHtml.includes("event-calendar")) continue
+
+      // Skip pure number/km strings
+      if (/^\d+(\.\d+)?\s*km$/i.test(text)) continue
+
+      // This should be the race name link
+      if (text.length >= 3 && text.length <= 150) {
+        raceName = text
+        eventUrl = href.startsWith("http") ? href : `https://running.life${href}`
         break
       }
     }
-    
-    // If no name found from links, try to get it from h2 or strong tags
-    if (!raceName) {
-      const nameMatch = eventHtml.match(/<(?:h2|h3|strong)[^>]*>([\s\S]*?)<\/(?:h2|h3|strong)>/i)
-      if (nameMatch) {
-        raceName = nameMatch[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
-      }
-    }
-    
-    if (!raceName || raceName.length < 3) continue
-    
-    // Skip navigation items
-    if (/^(Home|Menu|Suche|Filter|Mehr|Alle|Monatliche|Entdecken|\d+ km)$/i.test(raceName)) continue
-    
-    // Extract location and region
-    // Format is usually: City, Region (e.g., "Wien, Wien" or "Graz, Steiermark")
+
+    if (!raceName) continue
+
+    // --- LOCATION & REGION ---
     let location = ""
     let region = ""
-    
-    // Look for "City, Region" pattern after the race name
+
+    // Strip all tags to get plain text of the section
+    const plainText = eventHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ")
+
     for (const r of REGIONS) {
-      const locPattern = new RegExp(`([A-Za-zäöüÄÖÜß][A-Za-zäöüÄÖÜß\\s\\.-]{1,40}),\\s*${r}(?![a-z])`, "i")
-      const locMatch = eventHtml.match(locPattern)
+      // Look for "SomeCity, Region" or "SomeCity Region"
+      const locPattern = new RegExp(`([A-Za-z\u00e4\u00f6\u00fc\u00c4\u00d6\u00dc\u00df][A-Za-z\u00e4\u00f6\u00fc\u00c4\u00d6\u00dc\u00df\\s\\.\\-]{1,40}),\\s*${r}(?![a-z])`, "i")
+      const locMatch = plainText.match(locPattern)
       if (locMatch) {
         location = locMatch[1].trim()
         region = r
         break
       }
     }
-    
-    // If no match with city, just look for region name
+
+    // Fallback: just find the region name anywhere
     if (!region) {
       for (const r of REGIONS) {
-        if (eventHtml.includes(r)) {
+        if (plainText.includes(r)) {
           region = r
           location = r
           break
         }
       }
     }
-    
+
     if (!region) {
       region = "Österreich"
       location = "Österreich"
     }
-    
-    // Extract distances from label-distance links
+
+    // --- DISTANCES ---
+    // label-distance links contain the distances: <a class="label-distance">6 km</a>
     const distances: string[] = []
-    const distMatches = [...eventHtml.matchAll(/label-distance[^>]*>(\d+(?:[,\.]\d+)?)\s*km/gi)]
-    for (const dm of distMatches) {
-      const dist = `${dm[1]} km`
-      if (!distances.includes(dist) && distances.length < 10) {
-        distances.push(dist)
+    const distLinkMatches = [...eventHtml.matchAll(/label-distance[^>]*>([\s\S]*?)<\/a>/gi)]
+    for (const dm of distLinkMatches) {
+      const distText = dm[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
+      // Should look like "6 km" or "21.1 km"
+      if (/^\d+(?:[,\.]\d+)?\s*km$/i.test(distText) && !distances.includes(distText) && distances.length < 10) {
+        distances.push(distText)
       }
     }
-    
-    // Also check for distances in plain text
+
+    // Also try plain text km matches if no label-distance found
     if (distances.length === 0) {
-      const plainDistMatches = [...eventHtml.matchAll(/>(\d+(?:[,\.]\d+)?)\s*km</gi)]
-      for (const dm of plainDistMatches) {
-        const dist = `${dm[1]} km`
+      const kmMatches = [...eventHtml.matchAll(/(\d+(?:[,\.]\d+)?)\s*km/gi)]
+      for (const km of kmMatches) {
+        const dist = `${km[1]} km`
         if (!distances.includes(dist) && distances.length < 10) {
           distances.push(dist)
         }
       }
     }
-    
-    // Determine category from race name or context
+
+    // --- CATEGORY ---
     let category = "Laufrennen"
-    const contextLower = (raceName + " " + eventHtml).toLowerCase()
-    
+    const contextLower = (raceName + " " + plainText).toLowerCase()
     const categoryMap = [
       { keywords: ["trailrun", "trail run", "trail"], cat: "Trailrun" },
       { keywords: ["triathlon"], cat: "Triathlon" },
       { keywords: ["hindernislauf", "obstacle"], cat: "Hindernislauf" },
-      { keywords: ["halbmarathon", "half marathon", "half-marathon"], cat: "Halbmarathon" },
-      { keywords: ["ultramarathon", "ultra marathon", "ultra-marathon", "backyard"], cat: "Ultramarathon" },
+      { keywords: ["halbmarathon", "half marathon"], cat: "Halbmarathon" },
+      { keywords: ["ultramarathon", "backyard ultra"], cat: "Ultramarathon" },
       { keywords: ["marathon"], cat: "Marathon" },
       { keywords: ["duathlon"], cat: "Duathlon" },
-      { keywords: ["berglauf", "vertical", "bergrennen"], cat: "Berglauf" },
+      { keywords: ["berglauf", "vertical km", "bergrennen"], cat: "Berglauf" },
     ]
-    
     for (const { keywords, cat } of categoryMap) {
       if (keywords.some(k => contextLower.includes(k))) {
         category = cat
         break
       }
     }
-    
-    // Check for duplicate (same name and date)
-    const isDuplicate = races.some(r => r.name === raceName && r.date === date)
-    if (isDuplicate) continue
-    
+
+    // Avoid duplicates
+    if (races.some(r => r.name === raceName && r.date === date)) continue
+
     races.push({
       id: `p${pageNum}-${races.length}`,
       date,
