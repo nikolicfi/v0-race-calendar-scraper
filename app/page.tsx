@@ -81,13 +81,13 @@ export default function ScraperPage() {
   const categories = [...new Set(races.map(r => r.category))].filter(Boolean).sort()
 
   const downloadCSV = () => {
-    const headers = ["ID", "Date", "Date Range", "Name", "Location", "Region", "Category", "Distances", "Month", "Year", "Image URL", "Event URL"]
+    const headers = ["ID", "Date", "Date Formatted", "Name", "Location", "Region", "Category", "Distances", "Month", "Year", "Image URL"]
     const csvContent = [
       headers.join(","),
       ...filteredRaces.map(race => [
         race.id,
         race.date,
-        race.dateRange || "",
+        `"${(race.dateFormatted || race.date).replace(/"/g, '""')}"`,
         `"${race.name.replace(/"/g, '""')}"`,
         `"${race.location.replace(/"/g, '""')}"`,
         `"${race.region.replace(/"/g, '""')}"`,
@@ -95,8 +95,7 @@ export default function ScraperPage() {
         `"${race.distances.join("; ").replace(/"/g, '""')}"`,
         race.month || "",
         race.year || "",
-        race.imageUrl || "",
-        race.eventUrl || ""
+        race.imageUrl || ""
       ].join(","))
     ].join("\n")
 

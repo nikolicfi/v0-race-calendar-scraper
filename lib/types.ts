@@ -1,6 +1,7 @@
 export interface RaceEvent {
   id: string
   date: string
+  dateFormatted?: string
   dateRange?: string
   name: string
   location: string
