@@ -34,12 +34,13 @@ export default function ScraperPage() {
 
     const allRaces: RaceEvent[] = []
     let currentPage = 1
-    let hasMore = true
     let expectedTotalPages = 35
-    let consecutiveEmptyPages = 0
+    let consecutiveErrors = 0
+    const maxPages = 50
 
     try {
-      while (hasMore && currentPage <= 50 && consecutiveEmptyPages < 3) {
+      // Keep scraping until we've checked all expected pages
+      while (currentPage <= expectedTotalPages && currentPage <= maxPages && consecutiveErrors < 5) {
         setStatusMessage(`Fetching page ${currentPage} of ~${expectedTotalPages}...`)
         setPagesScraped(currentPage)
         
@@ -47,40 +48,42 @@ export default function ScraperPage() {
         
         if (!response.ok) {
           console.log("[v0] Page fetch failed:", currentPage, response.status)
+          consecutiveErrors++
           currentPage++
-          consecutiveEmptyPages++
+          // Small delay before retry
+          await new Promise(r => setTimeout(r, 300))
           continue
         }
 
         const data = await response.json()
-        console.log("[v0] Page response:", currentPage, data)
+        console.log("[v0] Page response:", currentPage, "races found:", data.races?.length || 0)
 
         if (!data.success) {
           console.log("[v0] Page not successful:", currentPage, data.error)
+          consecutiveErrors++
           currentPage++
-          consecutiveEmptyPages++
+          await new Promise(r => setTimeout(r, 300))
           continue
         }
+
+        // Reset error counter on successful response
+        consecutiveErrors = 0
 
         if (data.races && data.races.length > 0) {
           allRaces.push(...data.races)
           setRaces([...allRaces])
-          consecutiveEmptyPages = 0
-        } else {
-          consecutiveEmptyPages++
         }
+        // Don't stop on empty pages - some pages may have races that don't match our parsing
 
         if (currentPage === 1 && data.totalPages) {
-          expectedTotalPages = data.totalPages
-          setTotalPages(data.totalPages)
+          expectedTotalPages = Math.min(data.totalPages, maxPages)
+          setTotalPages(expectedTotalPages)
         }
-
-        hasMore = data.hasMore
 
         currentPage++
 
-        // Small delay between requests
-        await new Promise(r => setTimeout(r, 150))
+        // Small delay between requests to be respectful
+        await new Promise(r => setTimeout(r, 200))
       }
 
       // Deduplicate

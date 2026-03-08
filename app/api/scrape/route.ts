@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 
-export const maxDuration = 30
+export const maxDuration = 60
 export const dynamic = "force-dynamic"
 
 const REGIONS = [
@@ -182,39 +182,67 @@ export async function GET(request: Request) {
       ? "https://running.life/laufkalender/osterreich"
       : `https://running.life/laufkalender/osterreich?page=${page}`
 
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "de-DE,de;q=0.9",
-      },
-      cache: "no-store"
-    })
+    // Add retry logic for more robust fetching
+    let response: Response | null = null
+    let lastError: Error | null = null
+    
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+          },
+          cache: "no-store",
+          signal: AbortSignal.timeout(15000) // 15 second timeout per request
+        })
+        
+        if (response.ok) break
+        
+      } catch (e) {
+        lastError = e instanceof Error ? e : new Error(String(e))
+        // Wait before retry
+        await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
+      }
+    }
 
-    if (!response.ok) {
+    if (!response || !response.ok) {
       return NextResponse.json({
         success: false,
-        error: `HTTP ${response.status}`,
+        error: lastError?.message || `HTTP ${response?.status || 'unknown'}`,
         races: [],
         page,
-        hasMore: false,
-        totalPages: 0
+        hasMore: page < 35, // Assume there might be more pages
+        totalPages: 35
       })
     }
 
     const html = await response.text()
 
-    // Get total pages from first page
+    // Get total pages - look for pagination info
     let totalPages = 35
     if (page === 1) {
+      // Try to find total race count
       const countMatch = html.match(/(\d+)\s*Rennen/i)
       if (countMatch) {
         totalPages = Math.ceil(parseInt(countMatch[1]) / 20)
       }
+      
+      // Also try to find highest page number in pagination
+      const pageMatches = [...html.matchAll(/page=(\d+)/gi)]
+      if (pageMatches.length > 0) {
+        const maxFoundPage = Math.max(...pageMatches.map(m => parseInt(m[1])))
+        if (maxFoundPage > totalPages) {
+          totalPages = maxFoundPage
+        }
+      }
     }
 
-    // Check if has more pages
-    const hasMore = html.includes(`page=${page + 1}`)
+    // Check if has more pages - look for next page link
+    const hasMore = html.includes(`page=${page + 1}`) || page < totalPages
 
     // Parse races
     const races = parseEventsFromHtml(html, page)
@@ -223,8 +251,9 @@ export async function GET(request: Request) {
       success: true,
       races,
       page,
-      hasMore: hasMore || page < 35,
-      totalPages
+      hasMore,
+      totalPages,
+      htmlLength: html.length // For debugging
     })
 
   } catch (error) {
@@ -233,8 +262,8 @@ export async function GET(request: Request) {
       error: error instanceof Error ? error.message : "Unknown error",
       races: [],
       page,
-      hasMore: false,
-      totalPages: 0
+      hasMore: page < 35, // Don't stop pagination on error
+      totalPages: 35
     })
   }
 }
