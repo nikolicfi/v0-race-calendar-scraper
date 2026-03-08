@@ -5,7 +5,7 @@ import { ScraperHeader } from "@/components/scraper-header"
 import { ScraperControls } from "@/components/scraper-controls"
 import { ScraperStats } from "@/components/scraper-stats"
 import { ScraperPreview } from "@/components/scraper-preview"
-import type { RaceEvent, ScrapeResponse } from "@/lib/types"
+import type { RaceEvent, ScrapeResponse, ScrapeStatistics } from "@/lib/types"
 
 export default function ScraperPage() {
   const [races, setRaces] = useState<RaceEvent[]>([])
@@ -15,6 +15,9 @@ export default function ScraperPage() {
   const [searchTerm, setSearchTerm] = useState("")
   const [regionFilter, setRegionFilter] = useState<string>("all")
   const [categoryFilter, setCategoryFilter] = useState<string>("all")
+  const [pagesScraped, setPagesScraped] = useState<number | undefined>()
+  const [totalPagesExpected, setTotalPagesExpected] = useState<number | undefined>()
+  const [statistics, setStatistics] = useState<ScrapeStatistics | undefined>()
 
   const handleScrape = async () => {
     setIsLoading(true)
@@ -27,6 +30,9 @@ export default function ScraperPage() {
       if (data.success) {
         setRaces(data.data)
         setScrapedAt(data.scrapedAt)
+        setPagesScraped(data.pagesScraped)
+        setTotalPagesExpected(data.totalPagesExpected)
+        setStatistics(data.statistics)
       } else {
         setError(data.error || "Failed to scrape data")
       }
@@ -50,7 +56,7 @@ export default function ScraperPage() {
   const categories = [...new Set(races.map(r => r.category))].filter(Boolean).sort()
 
   const downloadCSV = () => {
-    const headers = ["ID", "Date", "Date Range", "Name", "Location", "Region", "Category", "Distances", "Image URL", "Event URL"]
+    const headers = ["ID", "Date", "Date Range", "Name", "Location", "Region", "Category", "Distances", "Month", "Year", "Image URL", "Event URL"]
     const csvContent = [
       headers.join(","),
       ...filteredRaces.map(race => [
@@ -62,6 +68,8 @@ export default function ScraperPage() {
         `"${race.region.replace(/"/g, '""')}"`,
         `"${race.category.replace(/"/g, '""')}"`,
         `"${race.distances.join("; ").replace(/"/g, '""')}"`,
+        race.month || "",
+        race.year || "",
         race.imageUrl || "",
         race.eventUrl || ""
       ].join(","))
@@ -79,7 +87,7 @@ export default function ScraperPage() {
 
   return (
     <main className="min-h-screen bg-background">
-      <div className="container mx-auto px-4 py-8">
+      <div className="container mx-auto px-4 py-8 max-w-7xl">
         <ScraperHeader />
         
         <ScraperControls 
@@ -110,6 +118,9 @@ export default function ScraperPage() {
           regions={regions.length}
           categories={categories.length}
           scrapedAt={scrapedAt}
+          pagesScraped={pagesScraped}
+          totalPagesExpected={totalPagesExpected}
+          statistics={statistics}
         />
 
         <ScraperPreview 
