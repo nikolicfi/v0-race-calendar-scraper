@@ -34,194 +34,110 @@ interface RaceEvent {
   imageUrl?: string
 }
 
-function parseEventsFromHtml(html: string, pageNum: number): RaceEvent[] {
+// Parse the plain text content from the rendered page
+function parseTextContent(text: string, pageNum: number): RaceEvent[] {
   const races: RaceEvent[] = []
-
-  // Decode HTML entities
-  let text = html
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&auml;/g, "ä").replace(/&ouml;/g, "ö").replace(/&uuml;/g, "ü")
-    .replace(/&Auml;/g, "Ä").replace(/&Ouml;/g, "Ö").replace(/&Uuml;/g, "Ü")
-    .replace(/&szlig;/g, "ß")
-    .replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec)))
-
-  // Try multiple parsing strategies
   
-  // Strategy 1: Look for event card divs with data attributes or classes
-  const cardPatterns = [
-    /<div[^>]*class="[^"]*card[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi,
-    /<article[^>]*>([\s\S]*?)<\/article>/gi,
-    /<li[^>]*class="[^"]*event[^"]*"[^>]*>([\s\S]*?)<\/li>/gi,
-  ]
+  // Split by date pattern: Mär7Sa or Mär6-7Fr - Sa
+  // The format is: DateDayOfWeek ## RaceName Location, Region Category Distances
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0)
   
-  let foundCards: string[] = []
-  for (const pattern of cardPatterns) {
-    const matches = [...text.matchAll(pattern)]
-    if (matches.length > 0) {
-      foundCards = matches.map(m => m[0])
-      break
-    }
-  }
-
-  // Strategy 2: Split by date headers (Mär7, Apr15 format)
-  if (foundCards.length === 0) {
-    // Look for date patterns followed by content
-    const dateBlockPattern = /((?:Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)\d{1,2}(?:-\d{1,2})?)([\s\S]*?)(?=(?:Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)\d{1,2}|$)/gi
-    const dateBlocks = [...text.matchAll(dateBlockPattern)]
+  let currentDate = ""
+  let currentMonth = ""
+  let currentYear = "2026"
+  let currentDateFormatted = ""
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     
-    for (const block of dateBlocks) {
-      const dateStr = block[1]
-      const content = block[2]
-      
-      // Parse the date
-      const dateMatch = dateStr.match(/(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)(\d{1,2})/i)
-      if (!dateMatch) continue
-      
+    // Check for date line: Mär7Sa or Mär6-7Fr - Sa
+    const dateMatch = line.match(/^(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)(\d{1,2})(?:-\d{1,2})?(?:[A-Za-z]{2})?(?:\s*-\s*[A-Za-z]{2})?$/i)
+    if (dateMatch) {
       const monthStr = dateMatch[1].toLowerCase().slice(0, 3)
-      const month = MONTH_MAP[monthStr] || "01"
+      currentMonth = MONTH_MAP[monthStr] || "01"
       const day = dateMatch[2].padStart(2, "0")
-      let year = "2026"
-      if (parseInt(month) <= 2) year = "2027"
+      currentYear = parseInt(currentMonth) <= 2 ? "2027" : "2026"
+      currentDate = `${currentYear}-${currentMonth}-${day}`
+      currentDateFormatted = `${parseInt(day)}. ${MONTH_NAMES[currentMonth]} ${currentYear}`
+      continue
+    }
+    
+    // Check for race name line: ## RaceName or just bold race name
+    const raceNameMatch = line.match(/^##\s*(.+)$/)
+    if (raceNameMatch && currentDate) {
+      const raceName = raceNameMatch[1].trim()
       
-      const date = `${year}-${month}-${day}`
-      const dateFormatted = `${parseInt(day)}. ${MONTH_NAMES[month]} ${year}`
-      
-      // Extract race name - look for links or headers
-      const namePatterns = [
-        /<a[^>]*>([\s\S]*?)<\/a>/i,
-        /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i,
-        /<strong[^>]*>([\s\S]*?)<\/strong>/i,
-        /<b[^>]*>([\s\S]*?)<\/b>/i,
-      ]
-      
-      let raceName = ""
-      for (const np of namePatterns) {
-        const nm = content.match(np)
-        if (nm) {
-          raceName = nm[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
-          if (raceName.length >= 3 && raceName.length <= 150) break
-          raceName = ""
-        }
+      // Skip navigation/header items
+      if (/^(Laufkalender|Home|Menu|Suche|Filter|Monatliche|Entdecken|Halbmarathons|Marathons)/i.test(raceName)) {
+        continue
       }
       
-      if (!raceName) continue
-      if (/^(Home|Menu|Suche|Filter|Cookie|Mehr|Alle|Impressum)/i.test(raceName)) continue
-      
-      // Find region
-      let region = ""
+      // Look ahead for location and details
       let location = ""
+      let region = ""
+      let category = "Laufrennen"
+      const distances: string[] = []
       
-      for (const r of REGIONS) {
-        if (content.includes(r)) {
-          region = r
-          const locMatch = content.match(new RegExp(`([A-Za-zäöüÄÖÜß][A-Za-zäöüÄÖÜß\\s-]{1,40}),?\\s*${r}`, "i"))
-          location = locMatch ? locMatch[1].trim() : r
+      // Check next lines for location and details
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const nextLine = lines[j]
+        
+        // Check for location, region pattern
+        for (const r of REGIONS) {
+          const locMatch = nextLine.match(new RegExp(`^([A-Za-zäöüÄÖÜß][A-Za-zäöüÄÖÜß\\s-]+),\\s*${r}$`, "i"))
+          if (locMatch) {
+            location = locMatch[1].trim()
+            region = r
+            break
+          }
+        }
+        
+        // Check for category
+        const categories = ["Trailrun", "Triathlon", "Hindernislauf", "Duathlon", "Aquathlon"]
+        for (const cat of categories) {
+          if (nextLine.includes(cat)) {
+            category = cat
+          }
+        }
+        
+        // Check for distances
+        const distMatches = [...nextLine.matchAll(/(\d+(?:[,\.]\d+)?)\s*km/gi)]
+        for (const dm of distMatches) {
+          if (!distances.includes(dm[0]) && distances.length < 8) {
+            distances.push(dm[0])
+          }
+        }
+        
+        // Check for Halbmarathon
+        if (nextLine.toLowerCase().includes("halbmarathon") && !distances.some(d => d.includes("21"))) {
+          distances.push("21.1 km")
+        }
+        
+        // If we hit another date or race name, stop looking
+        if (nextLine.match(/^(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)\d/i) || nextLine.startsWith("##")) {
           break
         }
       }
       
-      if (!region) continue
-      
-      // Distances
-      const distances: string[] = []
-      const distMatches = [...content.matchAll(/(\d+(?:[,\.]\d+)?)\s*km/gi)]
-      for (const dm of distMatches) {
-        if (!distances.includes(dm[0]) && distances.length < 8) {
-          distances.push(dm[0])
-        }
+      // Only add if we found a region
+      if (region && !races.some(r => r.name === raceName && r.date === currentDate)) {
+        races.push({
+          id: `p${pageNum}-${races.length}`,
+          date: currentDate,
+          dateFormatted: currentDateFormatted,
+          name: raceName,
+          location: location || region,
+          region,
+          category,
+          distances,
+          month: currentMonth,
+          year: currentYear,
+          imageUrl: undefined
+        })
       }
-      
-      // Avoid duplicates
-      if (races.some(r => r.name === raceName && r.date === date)) continue
-      
-      races.push({
-        id: `p${pageNum}-${races.length}`,
-        date,
-        dateFormatted,
-        name: raceName,
-        location,
-        region,
-        category: "Laufrennen",
-        distances,
-        month,
-        year,
-        imageUrl: undefined
-      })
     }
   }
-
-  // Strategy 3: Brute force - find all links with Austrian regions nearby
-  if (races.length === 0) {
-    const allLinks = [...text.matchAll(/<a[^>]+href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi)]
-    
-    for (const link of allLinks) {
-      const href = link[1]
-      const linkText = link[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
-      
-      // Skip if too short/long or navigation
-      if (linkText.length < 3 || linkText.length > 150) continue
-      if (/^(Home|Menu|Suche|Filter|Cookie|Mehr|Alle|Seite|Page|\d+|›|«|»|<|>)/i.test(linkText)) continue
-      
-      const pos = link.index || 0
-      const context = text.slice(Math.max(0, pos - 300), Math.min(text.length, pos + 500))
-      
-      // Must have a region
-      let region = ""
-      let location = ""
-      for (const r of REGIONS) {
-        if (context.includes(r)) {
-          region = r
-          const locMatch = context.match(new RegExp(`([A-Za-zäöüÄÖÜß][A-Za-zäöüÄÖÜß\\s-]{1,40}),?\\s*${r}`, "i"))
-          location = locMatch ? locMatch[1].trim() : r
-          break
-        }
-      }
-      
-      if (!region) continue
-      
-      // Find date
-      const dateMatch = context.match(/(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)\s*(\d{1,2})/i)
-      if (!dateMatch) continue
-      
-      const monthStr = dateMatch[1].toLowerCase().slice(0, 3)
-      const month = MONTH_MAP[monthStr] || "01"
-      const day = dateMatch[2].padStart(2, "0")
-      let year = "2026"
-      if (parseInt(month) <= 2) year = "2027"
-      
-      const date = `${year}-${month}-${day}`
-      const dateFormatted = `${parseInt(day)}. ${MONTH_NAMES[month]} ${year}`
-      
-      // Distances
-      const distances: string[] = []
-      const distMatches = [...context.matchAll(/(\d+(?:[,\.]\d+)?)\s*km/gi)]
-      for (const dm of distMatches) {
-        if (!distances.includes(dm[0]) && distances.length < 8) {
-          distances.push(dm[0])
-        }
-      }
-      
-      // Avoid duplicates
-      if (races.some(r => r.name === linkText && r.date === date)) continue
-      
-      races.push({
-        id: `p${pageNum}-${races.length}`,
-        date,
-        dateFormatted,
-        name: linkText,
-        location,
-        region,
-        category: "Laufrennen",
-        distances,
-        month,
-        year,
-        imageUrl: undefined
-      })
-    }
-  }
-
+  
   return races
 }
 
@@ -230,100 +146,57 @@ export async function GET(request: Request) {
   const page = parseInt(searchParams.get("page") || "1")
 
   try {
-    const url = page === 1
+    const targetUrl = page === 1
       ? "https://running.life/laufkalender/osterreich"
       : `https://running.life/laufkalender/osterreich?page=${page}`
 
-    // Add retry logic for more robust fetching
-    let response: Response | null = null
-    let lastError: Error | null = null
+    // Use r.jina.ai to get rendered content as markdown/text
+    // This service renders JavaScript and returns clean text
+    const jinaUrl = `https://r.jina.ai/${targetUrl}`
     
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        response = await fetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-          },
-          cache: "no-store",
-          signal: AbortSignal.timeout(15000) // 15 second timeout per request
-        })
-        
-        if (response.ok) break
-        
-      } catch (e) {
-        lastError = e instanceof Error ? e : new Error(String(e))
-        // Wait before retry
-        await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
-      }
-    }
+    const response = await fetch(jinaUrl, {
+      headers: {
+        "Accept": "text/plain",
+        "User-Agent": "Mozilla/5.0 (compatible; RaceCalendarBot/1.0)"
+      },
+      signal: AbortSignal.timeout(30000)
+    })
 
-    if (!response || !response.ok) {
+    if (!response.ok) {
       return NextResponse.json({
         success: false,
-        error: lastError?.message || `HTTP ${response?.status || 'unknown'}`,
+        error: `Jina fetch failed: ${response.status}`,
         races: [],
         page,
-        hasMore: page < 35, // Assume there might be more pages
+        hasMore: page < 35,
         totalPages: 35
       })
     }
 
-    const html = await response.text()
-
-    // Get total pages - look for pagination info
-    let totalPages = 35
+    const text = await response.text()
+    
+    // Parse the text content
+    const races = parseTextContent(text, page)
+    
+    // Get total pages from first page
+    let totalPages = 33
     if (page === 1) {
-      // Try to find total race count
-      const countMatch = html.match(/(\d+)\s*Rennen/i)
+      const countMatch = text.match(/(\d+)\s*Rennen/i)
       if (countMatch) {
         totalPages = Math.ceil(parseInt(countMatch[1]) / 20)
       }
-      
-      // Also try to find highest page number in pagination
-      const pageMatches = [...html.matchAll(/page=(\d+)/gi)]
-      if (pageMatches.length > 0) {
-        const maxFoundPage = Math.max(...pageMatches.map(m => parseInt(m[1])))
-        if (maxFoundPage > totalPages) {
-          totalPages = maxFoundPage
-        }
-      }
     }
-
-    // Check if has more pages - look for next page link
-    const hasMore = html.includes(`page=${page + 1}`) || page < totalPages
-
-    // Parse races
-    const races = parseEventsFromHtml(html, page)
-    
-    // Debug: count links found in HTML
-    const laufLinks = (html.match(/\/lauf\//gi) || []).length
-    const allLinks = (html.match(/<a[^>]+href/gi) || []).length
-    
-    // Check if this looks like a JS-rendered page (minimal content)
-    const isJsRendered = html.length < 5000 || (allLinks < 10 && laufLinks === 0)
 
     return NextResponse.json({
       success: true,
       races,
       page,
-      hasMore,
+      hasMore: page < totalPages,
       totalPages,
       debug: {
-        htmlLength: html.length,
-        laufLinksFound: laufLinks,
-        totalLinksFound: allLinks,
-        isJsRendered,
-        htmlSample: html.slice(0, 500),
-        // Get a sample from middle of page to see actual content structure
-        htmlMiddle: html.slice(50000, 52000),
-        // Count regions found
-        regionsFound: REGIONS.filter(r => html.includes(r)).join(", "),
-        // Count date patterns
-        datePatterns: (html.match(/(Jan|Jän|Feb|Mär|Mar|Apr|Mai|Jun|Jul|Aug|Sep|Okt|Nov|Dez)\d{1,2}/gi) || []).length
+        textLength: text.length,
+        textSample: text.slice(0, 1000),
+        racesFound: races.length
       }
     })
 
@@ -333,7 +206,7 @@ export async function GET(request: Request) {
       error: error instanceof Error ? error.message : "Unknown error",
       races: [],
       page,
-      hasMore: page < 35, // Don't stop pagination on error
+      hasMore: page < 35,
       totalPages: 35
     })
   }
