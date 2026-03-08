@@ -5,7 +5,8 @@ import { ScraperHeader } from "@/components/scraper-header"
 import { ScraperControls } from "@/components/scraper-controls"
 import { ScraperStats } from "@/components/scraper-stats"
 import { ScraperPreview } from "@/components/scraper-preview"
-import type { RaceEvent, ScrapeResponse, ScrapeStatistics } from "@/lib/types"
+import { Progress } from "@/components/ui/progress"
+import type { RaceEvent, ScrapeStatistics } from "@/lib/types"
 
 export default function ScraperPage() {
   const [races, setRaces] = useState<RaceEvent[]>([])
@@ -18,6 +19,9 @@ export default function ScraperPage() {
   const [pagesScraped, setPagesScraped] = useState<number | undefined>()
   const [totalPagesExpected, setTotalPagesExpected] = useState<number | undefined>()
   const [statistics, setStatistics] = useState<ScrapeStatistics | undefined>()
+  const [progress, setProgress] = useState(0)
+  const [statusMessage, setStatusMessage] = useState("")
+  const [racesFound, setRacesFound] = useState(0)
 
   const handleScrape = async () => {
     setIsLoading(true)
@@ -27,39 +31,71 @@ export default function ScraperPage() {
     setTotalPagesExpected(undefined)
     setStatistics(undefined)
     setScrapedAt(null)
+    setProgress(0)
+    setStatusMessage("Starting scraper...")
+    setRacesFound(0)
     
     try {
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 58000)
-      
-      const response = await fetch("/api/scrape", {
-        signal: controller.signal
-      })
-      
-      clearTimeout(timeoutId)
+      const response = await fetch("/api/scrape")
       
       if (!response.ok) {
         throw new Error(`Server error: ${response.status}`)
       }
       
-      const data: ScrapeResponse = await response.json()
+      if (!response.body) {
+        throw new Error("No response body")
+      }
       
-      if (data.success) {
-        setRaces(data.data)
-        setScrapedAt(data.scrapedAt)
-        setPagesScraped(data.pagesScraped)
-        setTotalPagesExpected(data.totalPagesExpected)
-        setStatistics(data.statistics)
-      } else {
-        setError(data.error || "Failed to scrape data")
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      
+      while (true) {
+        const { done, value } = await reader.read()
+        
+        if (done) break
+        
+        buffer += decoder.decode(value, { stream: true })
+        
+        // Process complete SSE messages
+        const lines = buffer.split("\n\n")
+        buffer = lines.pop() || ""
+        
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              
+              if (data.type === "status") {
+                setStatusMessage(data.message)
+                if (data.progress !== undefined) setProgress(data.progress)
+                if (data.totalPages) setTotalPagesExpected(data.totalPages)
+              } else if (data.type === "progress") {
+                setPagesScraped(data.pagesScraped)
+                setTotalPagesExpected(data.totalPages)
+                setRacesFound(data.racesFound)
+                setProgress(data.progress)
+                setStatusMessage(`Scraped ${data.pagesScraped}/${data.totalPages} pages, found ${data.racesFound} races`)
+              } else if (data.type === "complete") {
+                setRaces(data.data)
+                setScrapedAt(data.scrapedAt)
+                setPagesScraped(data.pagesScraped)
+                setTotalPagesExpected(data.totalPagesExpected)
+                setStatistics(data.statistics)
+                setProgress(100)
+                setStatusMessage(`Complete! Found ${data.count} races`)
+              } else if (data.type === "error") {
+                setError(data.message)
+              }
+            } catch {
+              // Skip invalid JSON
+            }
+          }
+        }
       }
     } catch (err) {
       if (err instanceof Error) {
-        if (err.name === 'AbortError') {
-          setError("Request timed out. The scraper may be taking longer than expected. Please try again.")
-        } else {
-          setError(err.message || "Failed to connect to scraper")
-        }
+        setError(err.message || "Failed to connect to scraper")
       } else {
         setError("Failed to connect to scraper")
       }
@@ -128,6 +164,21 @@ export default function ScraperPage() {
           regions={regions}
           categories={categories}
         />
+
+        {isLoading && (
+          <div className="mb-6 p-4 rounded-lg bg-card border border-border">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-foreground">{statusMessage}</span>
+              <span className="text-sm text-muted-foreground">{progress}%</span>
+            </div>
+            <Progress value={progress} className="h-2" />
+            {racesFound > 0 && (
+              <p className="text-xs text-muted-foreground mt-2">
+                Found {racesFound} races so far...
+              </p>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="mb-6 p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive">

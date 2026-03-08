@@ -35,7 +35,7 @@ export function ScraperPreview({ races, isLoading }: ScraperPreviewProps) {
     setCurrentPage(1)
   }
 
-  if (isLoading) {
+  if (isLoading && races.length === 0) {
     return (
       <Card className="bg-card border-border">
         <CardContent className="p-12">
@@ -47,10 +47,7 @@ export function ScraperPreview({ races, isLoading }: ScraperPreviewProps) {
             <div className="text-center">
               <p className="text-foreground font-semibold text-lg">Scraping all pages...</p>
               <p className="text-sm text-muted-foreground mt-1">
-                Fetching 650+ races from running.life/laufkalender/osterreich
-              </p>
-              <p className="text-xs text-muted-foreground mt-2">
-                This may take up to 30 seconds
+                Watch the progress bar above for live updates
               </p>
             </div>
           </div>
