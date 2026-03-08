@@ -6,6 +6,7 @@ import { ScraperControls } from "@/components/scraper-controls"
 import { ScraperStats } from "@/components/scraper-stats"
 import { ScraperPreview } from "@/components/scraper-preview"
 import { Progress } from "@/components/ui/progress"
+import { Card, CardContent } from "@/components/ui/card"
 import type { RaceEvent, ScrapeStatistics } from "@/lib/types"
 
 export default function ScraperPage() {
@@ -16,89 +17,112 @@ export default function ScraperPage() {
   const [searchTerm, setSearchTerm] = useState("")
   const [regionFilter, setRegionFilter] = useState<string>("all")
   const [categoryFilter, setCategoryFilter] = useState<string>("all")
-  const [pagesScraped, setPagesScraped] = useState<number | undefined>()
-  const [totalPagesExpected, setTotalPagesExpected] = useState<number | undefined>()
+  const [pagesScraped, setPagesScraped] = useState(0)
+  const [totalPages, setTotalPages] = useState(35)
   const [statistics, setStatistics] = useState<ScrapeStatistics | undefined>()
-  const [progress, setProgress] = useState(0)
   const [statusMessage, setStatusMessage] = useState("")
-  const [racesFound, setRacesFound] = useState(0)
 
   const handleScrape = async () => {
     setIsLoading(true)
     setError(null)
     setRaces([])
-    setPagesScraped(undefined)
-    setTotalPagesExpected(undefined)
+    setPagesScraped(0)
+    setTotalPages(35)
     setStatistics(undefined)
     setScrapedAt(null)
-    setProgress(0)
-    setStatusMessage("Starting scraper...")
-    setRacesFound(0)
-    
+    setStatusMessage("Starting scrape...")
+
+    const allRaces: RaceEvent[] = []
+    let currentPage = 1
+    let hasMore = true
+    let expectedTotalPages = 35
+    let consecutiveEmptyPages = 0
+
     try {
-      const response = await fetch("/api/scrape")
-      
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`)
-      }
-      
-      if (!response.body) {
-        throw new Error("No response body")
-      }
-      
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-      
-      while (true) {
-        const { done, value } = await reader.read()
+      while (hasMore && currentPage <= 50 && consecutiveEmptyPages < 3) {
+        setStatusMessage(`Fetching page ${currentPage} of ~${expectedTotalPages}...`)
+        setPagesScraped(currentPage)
         
-        if (done) break
+        const response = await fetch(`/api/scrape?page=${currentPage}`)
         
-        buffer += decoder.decode(value, { stream: true })
-        
-        // Process complete SSE messages
-        const lines = buffer.split("\n\n")
-        buffer = lines.pop() || ""
-        
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              
-              if (data.type === "status") {
-                setStatusMessage(data.message)
-                if (data.progress !== undefined) setProgress(data.progress)
-                if (data.totalPages) setTotalPagesExpected(data.totalPages)
-              } else if (data.type === "progress") {
-                setPagesScraped(data.pagesScraped)
-                setTotalPagesExpected(data.totalPages)
-                setRacesFound(data.racesFound)
-                setProgress(data.progress)
-                setStatusMessage(`Scraped ${data.pagesScraped}/${data.totalPages} pages, found ${data.racesFound} races`)
-              } else if (data.type === "complete") {
-                setRaces(data.data)
-                setScrapedAt(data.scrapedAt)
-                setPagesScraped(data.pagesScraped)
-                setTotalPagesExpected(data.totalPagesExpected)
-                setStatistics(data.statistics)
-                setProgress(100)
-                setStatusMessage(`Complete! Found ${data.count} races`)
-              } else if (data.type === "error") {
-                setError(data.message)
-              }
-            } catch {
-              // Skip invalid JSON
-            }
-          }
+        if (!response.ok) {
+          console.log("[v0] Page fetch failed:", currentPage, response.status)
+          currentPage++
+          consecutiveEmptyPages++
+          continue
         }
+
+        const data = await response.json()
+        console.log("[v0] Page response:", currentPage, data)
+
+        if (!data.success) {
+          console.log("[v0] Page not successful:", currentPage, data.error)
+          currentPage++
+          consecutiveEmptyPages++
+          continue
+        }
+
+        if (data.races && data.races.length > 0) {
+          allRaces.push(...data.races)
+          setRaces([...allRaces])
+          consecutiveEmptyPages = 0
+        } else {
+          consecutiveEmptyPages++
+        }
+
+        if (currentPage === 1 && data.totalPages) {
+          expectedTotalPages = data.totalPages
+          setTotalPages(data.totalPages)
+        }
+
+        hasMore = data.hasMore
+
+        currentPage++
+
+        // Small delay between requests
+        await new Promise(r => setTimeout(r, 150))
       }
+
+      // Deduplicate
+      const seen = new Set<string>()
+      const uniqueRaces = allRaces.filter(race => {
+        const key = `${race.name.toLowerCase()}|${race.date}|${race.location.toLowerCase()}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+
+      // Sort by date
+      uniqueRaces.sort((a, b) => a.date.localeCompare(b.date))
+
+      // Re-assign IDs
+      uniqueRaces.forEach((race, i) => {
+        race.id = `race-${i + 1}`
+      })
+
+      setRaces(uniqueRaces)
+      setScrapedAt(new Date().toISOString())
+      setStatusMessage(`Done! Found ${uniqueRaces.length} races`)
+      setPagesScraped(currentPage - 1)
+
+      // Calculate statistics
+      const byRegion: Record<string, number> = {}
+      const byCategory: Record<string, number> = {}
+      const byMonth: Record<string, number> = {}
+
+      for (const race of uniqueRaces) {
+        byRegion[race.region] = (byRegion[race.region] || 0) + 1
+        byCategory[race.category] = (byCategory[race.category] || 0) + 1
+        const monthKey = `${race.year}-${race.month}`
+        byMonth[monthKey] = (byMonth[monthKey] || 0) + 1
+      }
+
+      setStatistics({ byRegion, byCategory, byMonth })
+
     } catch (err) {
-      if (err instanceof Error) {
-        setError(err.message || "Failed to connect to scraper")
-      } else {
-        setError("Failed to connect to scraper")
-      }
+      console.log("[v0] Scrape error:", err)
+      setError(err instanceof Error ? err.message : "An error occurred")
+      setStatusMessage("")
     } finally {
       setIsLoading(false)
     }
@@ -137,13 +161,12 @@ export default function ScraperPage() {
 
     const blob = new Blob(["\ufeff" + csvContent], { type: "text/csv;charset=utf-8;" })
     const link = document.createElement("a")
-    const url = URL.createObjectURL(blob)
-    link.setAttribute("href", url)
-    link.setAttribute("download", `austria-races-${new Date().toISOString().split("T")[0]}.csv`)
-    document.body.appendChild(link)
+    link.href = URL.createObjectURL(blob)
+    link.download = `austria-races-${new Date().toISOString().split("T")[0]}.csv`
     link.click()
-    document.body.removeChild(link)
   }
+
+  const progress = totalPages > 0 ? Math.round((pagesScraped / totalPages) * 100) : 0
 
   return (
     <main className="min-h-screen bg-background">
@@ -166,25 +189,30 @@ export default function ScraperPage() {
         />
 
         {isLoading && (
-          <div className="mb-6 p-4 rounded-lg bg-card border border-border">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-foreground">{statusMessage}</span>
-              <span className="text-sm text-muted-foreground">{progress}%</span>
-            </div>
-            <Progress value={progress} className="h-2" />
-            {racesFound > 0 && (
-              <p className="text-xs text-muted-foreground mt-2">
-                Found {racesFound} races so far...
-              </p>
-            )}
-          </div>
+          <Card className="mb-6 bg-card border-border">
+            <CardContent className="py-5">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-foreground font-medium">{statusMessage}</span>
+                  <span className="text-muted-foreground">{progress}%</span>
+                </div>
+                <Progress value={progress} className="h-2" />
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>Page {pagesScraped} of ~{totalPages}</span>
+                  <span>{races.length} races found</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {error && (
-          <div className="mb-6 p-4 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive">
-            <p className="font-medium">Error</p>
-            <p className="text-sm">{error}</p>
-          </div>
+          <Card className="mb-6 bg-destructive/10 border-destructive/30">
+            <CardContent className="py-4">
+              <p className="text-destructive font-medium">Error</p>
+              <p className="text-destructive/80 text-sm mt-1">{error}</p>
+            </CardContent>
+          </Card>
         )}
 
         <ScraperStats 
@@ -194,13 +222,13 @@ export default function ScraperPage() {
           categories={categories.length}
           scrapedAt={scrapedAt}
           pagesScraped={pagesScraped}
-          totalPagesExpected={totalPagesExpected}
+          totalPagesExpected={totalPages}
           statistics={statistics}
         />
 
         <ScraperPreview 
           races={filteredRaces}
-          isLoading={isLoading}
+          isLoading={isLoading && races.length === 0}
         />
       </div>
     </main>
